@@ -5,6 +5,8 @@ import { Job } from './job.types';
 import { CreateJobDto } from './dto/create-job.dto';
 import type { ConfigType } from '@nestjs/config';
 import { appConfig } from '../config/app.config';
+import { createHash } from 'crypto';
+import { resultPath, uploadPath, writeFile, readFileIfExists } from './storage.local';
 
 const nowIso = () => new Date().toISOString();
 
@@ -71,7 +73,7 @@ export class JobsService {
     return this.toGetResponse(job);
   }
 
-  simulateProcess(jobId: string) {
+  async simulateProcess(jobId: string) {
     const job = this.mustGet(jobId);
 
     if (job.status !== 'QUEUED') {
@@ -82,7 +84,25 @@ export class JobsService {
     job.updatedAt = nowIso();
     this.repo.save(job);
 
-    // processing
+    const uploaded = await readFileIfExists(uploadPath(jobId));
+if (!uploaded) {
+  throw new BadRequestException('No uploaded file found (dev)');
+}
+
+const sha256 = createHash('sha256').update(uploaded).digest('hex');
+
+job.resultKey = `results/${job.id}/result.json`;
+
+const result = {
+  jobId: job.id,
+  status: 'DONE',
+  sha256,
+  size: uploaded.length,
+  processedAt: new Date().toISOString(),
+};
+
+await writeFile(resultPath(jobId), Buffer.from(JSON.stringify(result, null, 2), 'utf-8'));
+
     job.resultKey = `results/${job.id}/result.json`;
 
     job.status = 'DONE';
@@ -91,6 +111,23 @@ export class JobsService {
 
     return this.toGetResponse(job);
   }
+
+  async handleDevUpload(jobId: string, body: Buffer) {
+  const job = this.mustGet(jobId);
+
+  if (job.status !== 'UPLOAD_URL_ISSUED') {
+    throw new BadRequestException(`Cannot upload from status=${job.status}`);
+  }
+
+  // s3 emulation
+  await writeFile(uploadPath(jobId), body);
+
+  job.status = 'UPLOADED';
+  job.updatedAt = nowIso();
+  this.repo.save(job);
+
+  return this.toGetResponse(job);
+}
 
   private mustGet(jobId: string): Job {
     const job = this.repo.findById(jobId);
